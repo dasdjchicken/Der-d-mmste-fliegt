@@ -197,6 +197,7 @@
   #screen-winner h1 { font-family: 'Bebas Neue', sans-serif; font-size: 80px; color: var(--accent2); }
   #screen-winner .winner-name { font-family: 'Bebas Neue', sans-serif; font-size: 56px; color: var(--accent); }
 
+  .safe-card-badge { position: absolute; top: -10px; right: 8px; background: var(--green); color: #fff; font-size: 9px; font-weight: 900; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
   @media (max-width: 768px) {
     .game-layout, .lobby-grid { grid-template-columns: 1fr; }
     .home-cards { grid-template-columns: 1fr; }
@@ -285,7 +286,21 @@
 <!-- ══ SCREEN: MOD SETUP ══ -->
 <div id="screen-mod-setup" class="screen">
   <div class="card" style="max-width:480px; margin:0 auto;">
-    <h2>⚙️ Spieleinstellungen</h2>
+    <h2>🎙️ Moderator-Profil</h2>
+    <div class="cam-preview" id="modCamPreview">🎙️</div>
+    <div style="display:flex; gap:8px; justify-content:center; margin-bottom:20px;">
+      <button class="btn btn-secondary" onclick="startModCam()" id="modCamBtn">📷 Kamera an</button>
+      <label class="btn btn-secondary" style="cursor:pointer">
+        🖼️ Bild
+        <input type="file" accept="image/*" onchange="uploadModPic(event)" style="display:none">
+      </label>
+    </div>
+    <div class="form-group">
+      <label>Dein Name (Moderator)</label>
+      <input type="text" id="modName" placeholder="z.B. Max" maxlength="20">
+    </div>
+    <hr class="divider">
+    <h2 style="margin-bottom:16px;">⚙️ Spieleinstellungen</h2>
     <div class="form-group">
       <label>Leben pro Spieler</label>
       <input type="number" id="settingLives" value="4" min="1" max="10">
@@ -368,6 +383,12 @@
           <button class="circle-btn sg" onclick="giveCircle('small-green')">🟢 Buzzer ✓</button>
           <button class="circle-btn sr" onclick="giveCircle('small-red')">🔴 Buzzer ✗</button>
         </div>
+      </div>
+
+      <div class="mod-section">
+        <h4>Safe vergeben / entfernen</h4>
+        <button class="btn btn-green btn-full" style="font-size:13px;" onclick="toggleSafe()">✅ Safe togglen</button>
+        <div id="safeStatusText" style="font-size:12px; color:var(--muted); margin-top:6px; text-align:center;"></div>
       </div>
 
       <div class="mod-section">
@@ -573,15 +594,54 @@ function uploadPic(ev) {
 // ══════════════════════════════════════
 // MODERATOR: CREATE GAME
 // ══════════════════════════════════════
+async function startModCam() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    state.modCamStream = stream;
+    const preview = document.getElementById('modCamPreview');
+    preview.innerHTML = '<video autoplay muted playsinline style="width:100%;height:100%;object-fit:cover;border-radius:50%;"></video>';
+    preview.querySelector('video').srcObject = stream;
+    document.getElementById('modCamBtn').textContent = '📷 Kamera läuft';
+    toast('Kamera aktiv!', 'success');
+  } catch(e) { toast('Kamera konnte nicht gestartet werden', 'error'); }
+}
+
+function uploadModPic(ev) {
+  const file = ev.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 120; canvas.height = 120;
+      const ctx = canvas.getContext('2d');
+      const size = Math.min(img.width, img.height);
+      ctx.drawImage(img, (img.width-size)/2, (img.height-size)/2, size, size, 0, 0, 120, 120);
+      const compressed = canvas.toDataURL('image/jpeg', 0.7);
+      state.modPicDataUrl = compressed;
+      const preview = document.getElementById('modCamPreview');
+      preview.innerHTML = `<img src="${compressed}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`;
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
 async function createGame() {
+  const modNameVal = document.getElementById('modName').value.trim();
+  if (!modNameVal) { toast('Bitte deinen Namen eingeben!', 'error'); return; }
   const lives = parseInt(document.getElementById('settingLives').value) || 4;
   const rounds = parseInt(document.getElementById('settingRounds').value) || 2;
   const voteMode = document.getElementById('settingVoteMode').value;
 
   await auth.signInAnonymously();
+  const uid = auth.currentUser.uid;
   const code = genCode();
   state.roomCode = code;
   state.role = 'moderator';
+  state.playerId = uid;
+  state.playerName = modNameVal;
 
   await db.collection('rooms').doc(code).set({
     code,
@@ -594,6 +654,22 @@ async function createGame() {
     votes: {},
     votingActive: false,
     createdAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+
+  // Save moderator as player entry so they appear in lobby and game
+  const modPic = state.modPicDataUrl || null;
+  await db.collection('rooms').doc(code).collection('players').doc(uid).set({
+    id: uid,
+    name: modNameVal + ' (Mod)',
+    pic: modPic,
+    hasCam: !!state.modCamStream,
+    lives,
+    circles: [],
+    joinedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    eliminated: false,
+    safe: false,
+    order: 0,
+    isModerator: true
   });
 
   document.getElementById('lobbyRoomCode').textContent = code;
@@ -834,6 +910,7 @@ function renderModGame(players, room) {
     <div class="player-card ${p.eliminated ? 'eliminated' : ''} ${isActive ? 'active-turn' : ''}">
       ${isActive ? '<div class="turn-badge">🎯 Dran</div>' : ''}
       ${p.eliminated ? '<div class="elim-badge">💀 Raus</div>' : ''}
+      ${p.safe ? '<div class="safe-card-badge">✅ SAFE</div>' : ''}
       <div class="cam-wrap">
         ${p.pic ? `<img src="${p.pic}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">` :
           `<div style="background:${avatarBg(p.name)};width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:900;color:#fff;border-radius:50%;">${avatarInitials(p.name)}</div>`}
@@ -843,6 +920,14 @@ function renderModGame(players, room) {
       <div class="lives">${renderLives(p.lives, room.settings?.lives||4)}</div>
     </div>`;
   }).join('');
+
+  // Update safe status text
+  const selPid = document.getElementById('modSelectPlayer')?.value;
+  if (selPid) {
+    const selP = players.find(x => x.id === selPid);
+    const txt = document.getElementById('safeStatusText');
+    if (txt && selP) txt.textContent = selP.safe ? `${selP.name} ist aktuell SAFE` : `${selP.name} ist nicht safe`;
+  }
 
   // Player select dropdown
   const sel = document.getElementById('modSelectPlayer');
@@ -1007,13 +1092,28 @@ function renderPlayerVoting(players, room) {
 // ══════════════════════════════════════
 function isSafe(player, room) {
   if (!room) return false;
-  // Safe = alle Kreis in diesem Zyklus waren big-green (keine big-red)
+  // Manual safe override by moderator
+  if (player.safe) return true;
+  // Auto-safe: alle Fragen in diesem Zyklus richtig (big-green), kein big-red
   const circles = player.circles || [];
   const cycleLen = room.settings?.rounds || 2;
   const recent = circles.slice(-cycleLen);
   const hasBigRed = recent.some(c => c === 'big-red');
   const hasBigGreen = recent.filter(c => c === 'big-green').length >= cycleLen;
   return hasBigGreen && !hasBigRed;
+}
+
+async function toggleSafe() {
+  const sel = document.getElementById('modSelectPlayer');
+  const pid = sel?.value;
+  if (!pid) { toast('Spieler auswählen!', 'error'); return; }
+  const snap = await db.collection('rooms').doc(state.roomCode)
+    .collection('players').doc(pid).get();
+  const p = snap.data();
+  const newSafe = !p.safe;
+  await db.collection('rooms').doc(state.roomCode)
+    .collection('players').doc(pid).update({ safe: newSafe });
+  toast(newSafe ? `${p.name} ist jetzt SAFE ✅` : `Safe von ${p.name} entfernt`, newSafe ? 'success' : '');
 }
 
 async function startGame() {
